@@ -1,6 +1,8 @@
 import os
+from io import BytesIO
+from PIL import Image, ImageOps, UnidentifiedImageError
 from uuid import uuid4
-from fastapi import APIRouter, Request, Form, UploadFile, File
+from fastapi import APIRouter, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from app.database import run_query
@@ -66,7 +68,6 @@ def update_profile(
     phone: str = Form(""),
     address: str = Form(""),
     bio: str = Form(""),
-    role: str = Form("student"),
 ):
     user = get_user_from_session(request)
     if not user:
@@ -74,10 +75,10 @@ def update_profile(
 
     run_query(
         """
-        UPDATE users SET full_name=%s, phone=%s, address=%s, bio=%s, role=%s
+        UPDATE users SET full_name=%s, phone=%s, address=%s, bio=%s
         WHERE id=%s
         """,
-        (full_name, phone, address, bio, role, user["id"]),
+        (full_name, phone, address, bio, user["id"]),
         commit=True,
     )
     return RedirectResponse(f"/profile/{user['id']}", status_code=302)
@@ -89,11 +90,30 @@ def upload_avatar(request: Request, avatar: UploadFile = File(...)):
     if not user:
         return RedirectResponse("/login", status_code=302)
 
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    filename = f"avatar_{user['id']}_{uuid4().hex}_{avatar.filename}"
-    path = os.path.join(UPLOAD_DIR, filename)
-    with open(path, "wb") as f:
-        f.write(avatar.file.read())
+    max_size = 2 * 1024 * 1024  # Restrict source upload to 2 MiB.
+    data = avatar.file.read(max_size + 1)
+    if len(data) > max_size:
+        raise HTTPException(status_code=413, detail="Avatar must be <= 2 MiB")
 
+    try:
+        with Image.open(BytesIO(data)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("Unsupported image format")
+            if image.width * image.height > 4_000_000:
+                raise ValueError("Image dimensions are too large")
+            image.load()  # Actually decode the bytes; extensions and MIME types are not trusted.
+            normalized = ImageOps.exif_transpose(image)
+            mode = "RGBA" if "A" in normalized.getbands() else "RGB"
+            output = BytesIO()
+            normalized.convert(mode).save(output, format="PNG")
+            safe_content = output.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid avatar image") from exc
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    filename = f"avatar_{user['id']}_{uuid4().hex}.png"  # Ignore user-supplied filename.
+    path = os.path.join(UPLOAD_DIR, filename)
+    with open(path, "wb") as handle:
+        handle.write(safe_content)
     run_query("UPDATE users SET avatar_path=%s WHERE id=%s", (filename, user["id"]), commit=True)
     return RedirectResponse(f"/profile/{user['id']}", status_code=302)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from app.database import run_query
@@ -40,9 +40,11 @@ def grade_detail(request: Request, grade_id: int):
         FROM grades g
         JOIN assignments a ON a.id=g.assignment_id
         JOIN users u ON u.id=g.student_id
-        WHERE g.id=%s
+        WHERE g.id=%s AND (g.student_id=%s OR %s IN ('admin', 'teacher', 'ta'))
         """,
-        (grade_id,),
+        (grade_id, user["id"], user["role"]),
         fetchone=True,
     )
+    if grade is None:
+        raise HTTPException(status_code=404, detail="Grade not found")
     return templates.TemplateResponse("grade_detail.html", {"request": request, "user": user, "grade": grade})

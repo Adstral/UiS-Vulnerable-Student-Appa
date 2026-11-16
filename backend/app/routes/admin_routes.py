@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form
+from fastapi import APIRouter, Request, Form, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from app.database import run_query, get_conn
@@ -6,6 +6,24 @@ from app.auth import get_user_from_session
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+
+
+def require_staff(request: Request):
+    user = get_user_from_session(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Login required")
+    if user["role"] not in {"admin", "teacher", "ta"}:
+        raise HTTPException(status_code=403, detail="Staff privileges required")
+    return user
+
+
+def require_admin(request: Request):
+    user = get_user_from_session(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Login required")
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Administrator privileges required")
+    return user
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -31,30 +49,24 @@ def admin_home(request: Request):
 
 @router.get("/admin/users", response_class=HTMLResponse)
 def admin_users(request: Request):
-    user = get_user_from_session(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
+    user = require_admin(request)
     users = run_query("SELECT id, email, full_name, role FROM users ORDER BY id", fetchall=True)
     return templates.TemplateResponse("admin_users.html", {"request": request, "user": user, "users": users})
 
 
 @router.post("/admin/users/{user_id}/role")
 def update_role(request: Request, user_id: int, role: str = Form(...)):
-    user = get_user_from_session(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-
-    if request.headers.get("x-role") in ["admin", "teacher"] or role in ["admin", "teacher", "ta", "student"]:
-        run_query("UPDATE users SET role=%s WHERE id=%s", (role, user_id), commit=True)
+    require_admin(request)
+    if role not in {"admin", "teacher", "ta", "student"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    run_query("UPDATE users SET role=%s WHERE id=%s", (role, user_id), commit=True)
 
     return RedirectResponse("/admin/users", status_code=302)
 
 
 @router.get("/admin/grades", response_class=HTMLResponse)
 def admin_grades(request: Request):
-    user = get_user_from_session(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
+    user = require_staff(request)
 
     grades = run_query(
         """
@@ -75,27 +87,20 @@ def update_grade(
     grade_id: int,
     grade_value: str = Form(...),
     feedback: str = Form(...),
-    role: str = Form("student"),
 ):
-    user = get_user_from_session(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-
-    if role in ["admin", "teacher", "ta"]:
-        run_query(
-            "UPDATE grades SET grade_value=%s, feedback=%s, status='published' WHERE id=%s",
-            (grade_value, feedback, grade_id),
-            commit=True,
-        )
+    require_staff(request)
+    run_query(
+        "UPDATE grades SET grade_value=%s, feedback=%s, status='published' WHERE id=%s",
+        (grade_value, feedback, grade_id),
+        commit=True,
+    )
 
     return RedirectResponse("/admin/grades", status_code=302)
 
 
 @router.get("/admin/search-users", response_class=HTMLResponse)
 def search_users(request: Request, q: str = ""):
-    user = get_user_from_session(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
+    user = require_admin(request)
 
     sql = f"SELECT id, email, full_name, role FROM users WHERE email ILIKE '%{q}%' OR full_name ILIKE '%{q}%'"
     conn = get_conn()

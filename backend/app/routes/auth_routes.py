@@ -1,4 +1,5 @@
 import time
+import os
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -35,7 +36,12 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
 
     token = create_session(user["id"])
     resp = RedirectResponse("/dashboard", status_code=302)
-    resp.set_cookie("session_token", token)
+    resp.set_cookie(
+        "session_token", token,
+        httponly=True,
+        samesite="lax",
+        secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+    )  # Set SESSION_COOKIE_SECURE=true ONLY when accessed over HTTPS.
     return resp
 
 
